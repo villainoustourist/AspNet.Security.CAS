@@ -1,5 +1,5 @@
 ﻿{
-    "version": "1.0.0-*",
+    "version": "1.0.1-beta",
     "description": "AspNet.Security.CAS Class Library",
     "authors": [ "IUF Development" ],
     "tags": [ "CAS", "Jasig", "Authentication", "Middleware" ],

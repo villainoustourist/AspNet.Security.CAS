@@ -6,6 +6,7 @@ using Microsoft.AspNet.Authentication;
 using Microsoft.AspNet.Http;
 using Microsoft.AspNet.Http.Authentication;
 using Microsoft.AspNet.Http.Features.Authentication;
+using Microsoft.Extensions.Logging;
 
 namespace AspNet.Security.CAS
 {
@@ -13,9 +14,12 @@ namespace AspNet.Security.CAS
     {
         private static readonly RandomNumberGenerator CryptoRandom = RandomNumberGenerator.Create();
         private const string StateCookie = "__CasState";
-        private const string CorrelationPrefix = ".AspNet.Correlation.";
         private readonly HttpClient _httpClient;
-        
+
+        private const string CorrelationPrefix = ".AspNetCore.Correlation.";
+        private const string CorrelationProperty = ".xsrf";
+        private const string CorrelationMarker = "N";
+
         public CasHandler(HttpClient httpClient)
         {
             _httpClient = httpClient;
@@ -89,7 +93,7 @@ namespace AspNet.Security.CAS
                Request.PathBase + Options.CallbackPath +
                 "?state=" + Uri.EscapeDataString(state);
         }
-
+     
         protected void GenerateCorrelationId(AuthenticationProperties properties)
         {
             if (properties == null)
@@ -97,22 +101,24 @@ namespace AspNet.Security.CAS
                 throw new ArgumentNullException(nameof(properties));
             }
 
-            var correlationKey = CorrelationPrefix + Options.AuthenticationScheme;
-
-            var nonceBytes = new byte[32];
-            CryptoRandom.GetBytes(nonceBytes);
-            var correlationId = Base64UrlTextEncoder.Encode(nonceBytes);
-
-            properties.Items[correlationKey] = correlationId;
+            var bytes = new byte[32];
+            CryptoRandom.GetBytes(bytes);
+            var correlationId = Base64UrlTextEncoder.Encode(bytes);
 
             var cookieOptions = new CookieOptions
             {
                 HttpOnly = true,
-                Secure = Request.IsHttps
+                Secure = Request.IsHttps,
+                Expires = DateTime.UtcNow.Add(TimeSpan.FromMinutes(5))
             };
-            Response.Cookies.Append(correlationKey, correlationId, cookieOptions);
+
+            properties.Items[CorrelationProperty] = correlationId;
+
+            var cookieName = CorrelationPrefix + Options.AuthenticationScheme + "." + correlationId;
+
+            Response.Cookies.Append(cookieName, CorrelationMarker, cookieOptions);
         }
-        
+
         protected bool ValidateCorrelationId(AuthenticationProperties properties)
         {
             if (properties == null)
@@ -120,10 +126,21 @@ namespace AspNet.Security.CAS
                 throw new ArgumentNullException(nameof(properties));
             }
 
-            var correlationKey = CorrelationPrefix + Options.AuthenticationScheme;
-            var correlationCookie = Request.Cookies[correlationKey];
+            string correlationId;
+            if (!properties.Items.TryGetValue(CorrelationProperty, out correlationId))
+            {
+                Logger.LogCritical($"Correlation Property Not Found.  Name: {CorrelationPrefix}");
+                return false;
+            }
+
+            properties.Items.Remove(CorrelationProperty);
+
+            var cookieName = CorrelationPrefix + Options.AuthenticationScheme + "." + correlationId;
+
+            var correlationCookie = Request.Cookies[cookieName];
             if (string.IsNullOrEmpty(correlationCookie))
             {
+                Logger.LogCritical($"Correlation Cookie Not Found.  Name: {cookieName}");
                 return false;
             }
 
@@ -132,17 +149,15 @@ namespace AspNet.Security.CAS
                 HttpOnly = true,
                 Secure = Request.IsHttps
             };
-            Response.Cookies.Delete(correlationKey, cookieOptions);
+            Response.Cookies.Delete(cookieName, cookieOptions);
 
-            string correlationExtra;
-            if (!properties.Items.TryGetValue(correlationKey, out correlationExtra))
+            if (!string.Equals(correlationCookie, CorrelationMarker, StringComparison.Ordinal))
             {
+                Logger.LogCritical($"Unexpected Correlation Cookie Value.  Name: {cookieName} Value: {correlationCookie}");
                 return false;
             }
 
-            properties.Items.Remove(correlationKey);
-
-            return string.Equals(correlationCookie, correlationExtra, StringComparison.Ordinal);
+            return true;
         }
     }
 }
