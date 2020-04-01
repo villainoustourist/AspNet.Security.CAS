@@ -1,32 +1,68 @@
 ﻿using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.Http.Authentication;
-using Microsoft.AspNetCore.Http.Features.Authentication;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using System;
-using System.Net.Http;
+using System.Text.Encodings.Web;
 using System.Threading.Tasks;
+using Microsoft.AspNetCore.Http;
 
 namespace AspNetCore.Security.CAS
 {
     internal class CasHandler : RemoteAuthenticationHandler<CasOptions>
     {
-        private const string StateCookie = "__CasState";
-        private readonly HttpClient _httpClient;
-
-        public CasHandler(HttpClient httpClient)
+        /// <summary>
+        /// The handler calls methods on the events which give the application control at certain points where processing is occurring.
+        /// If it is not provided a default instance is supplied which does nothing when the methods are called.
+        /// </summary>
+        protected new CasEvents Events
         {
-            _httpClient = httpClient;
+            get => (CasEvents)base.Events;
+            set => base.Events = value;
         }
 
-        protected override async Task<bool> HandleUnauthorizedAsync(ChallengeContext context)
+        public CasHandler(IOptionsMonitor<CasOptions> options, ILoggerFactory logger, UrlEncoder encoder, ISystemClock clock)
+            : base(options, logger, encoder, clock)
         {
-            if (context == null)
+        }
+
+        protected override Task<object> CreateEventsAsync() => Task.FromResult<object>(new CasEvents());
+
+        protected override async Task<HandleRequestResult> HandleRemoteAuthenticateAsync()
+        {
+            AuthenticationProperties properties = null;
+            var query = Request.Query;
+            var state = query["state"];
+
+            properties = Options.StateDataFormat.Unprotect(state);
+            if (properties == null)
             {
-                throw new ArgumentNullException(nameof(context));
+                return HandleRequestResult.Fail("The state was missing or invalid.");
             }
 
-            var properties = new AuthenticationProperties(context.Properties);
+            // OAuth2 10.12 CSRF
+            if (!ValidateCorrelationId(properties))
+            {
+                return HandleRequestResult.Fail("Correlation failed.");
+            }
+
+            var casTicket = query["ticket"];
+            if (string.IsNullOrEmpty(casTicket))
+            {
+                return HandleRequestResult.Fail("Missing CAS ticket.");
+            }
+
+            var authTicket = await Options.TicketValidator.ValidateTicket(Context, properties, Scheme, Options, casTicket, BuildReturnTo(state));
+            if (authTicket == null)
+            {
+                return HandleRequestResult.Fail("Failed to retrieve user information from remote server.");
+            }
+
+            return HandleRequestResult.Success(authTicket);
+        }
+
+        protected override async Task HandleChallengeAsync(AuthenticationProperties properties)
+        {
             if (string.IsNullOrEmpty(properties.RedirectUri))
             {
                 properties.RedirectUri = CurrentUri;
@@ -37,55 +73,41 @@ namespace AspNetCore.Security.CAS
 
             var returnTo = BuildReturnTo(Options.StateDataFormat.Protect(properties));
 
-            var authorizationEndpoint = $"{Options.CasServerUrlBase}/login?service={Uri.EscapeDataString(returnTo)}";
+            var authorizationEndpoint = $"{Options.CasServerUrlBase}/login?service={returnTo}";
 
-            var redirectContext = new CasRedirectToAuthorizationEndpointContext(
-                Context, Options,
-                properties, authorizationEndpoint);
+            if (Options.Renew)
+            {
+                authorizationEndpoint += "&renew=true";
+            }
+
+            if (Options.Gateway)
+            {
+                authorizationEndpoint += "&gateway=true";
+            }
+
+            var redirectContext = new RedirectContext<CasOptions>(Context, Scheme, Options, properties, authorizationEndpoint);
+
             await Options.Events.RedirectToAuthorizationEndpoint(redirectContext);
-            return true;
-        }
-
-        protected override async Task<AuthenticateResult> HandleRemoteAuthenticateAsync()
-        {
-            var query = Request.Query;
-            var state = query["state"];
-
-            var properties = Options.StateDataFormat.Unprotect(state);
-            if (properties == null)
-            {
-                return AuthenticateResult.Fail("The state was missing or invalid.");
-            }
-
-            var cookieOptions = new CookieOptions
-            {
-                HttpOnly = true,
-                Secure = Request.IsHttps
-            };
-            Response.Cookies.Delete(StateCookie, cookieOptions);
-
-            // OAuth2 10.12 CSRF
-            if (!ValidateCorrelationId(properties))
-            {
-                return AuthenticateResult.Fail("Correlation failed.");
-            }
-
-            var ticket = query["ticket"];
-            if (string.IsNullOrEmpty(ticket))
-            {
-                return AuthenticateResult.Fail("Missing CAS ticket.");
-            }
-
-            var service = Uri.EscapeDataString(BuildReturnTo(state));
-
-            return await Options.TicketValidator.ValidateTicket(Context, _httpClient, properties, ticket, service);
         }
 
         private string BuildReturnTo(string state)
         {
-            return Request.Scheme + "://" + Request.Host +
-                   Request.PathBase + Options.CallbackPath +
-                   "?state=" + Uri.EscapeDataString(state);
+            var host = Request.Host;
+            var scheme = Request.Scheme;
+
+            if (!string.IsNullOrWhiteSpace(Options.ServiceHost))
+            {
+                host = new HostString(Options.ServiceHost.Replace("/", ""));
+            }
+
+            if (Options.ServiceForceHTTPS)
+            {
+                scheme = "https";
+            }
+
+            var returnTo = $"{scheme}://{host}{Request.PathBase}{Options.CallbackPath}?state={Uri.EscapeDataString(state)}";
+
+            return Options.EscapeServiceString ? Uri.EscapeDataString(returnTo) : returnTo;
         }
     }
 }

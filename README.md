@@ -1,63 +1,74 @@
 AspNetCore.Security.CAS
 ===================
 
-AspNet.Security.CAS is an [ASP.NET Core 1/MVC 6](http://docs.asp.net/en/1.0.0-rc2/) authentication provider for [CAS](https://github.com/Jasig/cas).
-
-This implimentation is based upon on Noel Bundick's [Owin.Security.CAS](https://github.com/noelbundick/Owin.Security.CAS) provider.
-
-[Microsoft.AspNetCore.Authentication.OAuth](https://github.com/aspnet/Security/tree/dev/src/Microsoft.AspNetCore.Authentication.Twitter) and [Microsoft.AspNetCore.Authentication.Twitter](https://github.com/aspnet/Security/tree/dev/src/Microsoft.AspNetCore.Authentication.Twitter) were used as structural references.
+A [CAS 2.0](https://apereo.github.io/cas/5.2.x/protocol/CAS-Protocol-V2-Specification.html) authentication provider for [ASP.NET Core 2](https://docs.microsoft.com/en-us/aspnet/core/),
+based on Microsoft's providers for [OAuth](https://github.com/aspnet/Security/tree/dev/src/Microsoft.AspNetCore.Authentication.OAuth) and [Twitter](https://github.com/aspnet/Security/tree/dev/src/Microsoft.AspNetCore.Authentication.Twitter).
 
 ## Usage
 
 1. Install the NuGet package
 
-    `PM> Install-Package AspNet.Security.CAS`
+    `PM> Install-Package AspNetCore.Security.CAS`
 
-1. Open **Startup.cs**
+1. Open `Startup.cs`
 
-1. Paste the following code below `// Uncomment the following lines to enable logging in with third party login providers`
+1. In your startup's `ConfigureServices` method:
 
+	```c#
+	services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+		.AddCookie(options =>
+		{
+			options.LoginPath = new PathString("/login");
+		})
+		.AddCAS(options =>
+		{
+			options.CasServerUrlBase = Configuration["CasBaseUrl"];   // Set in `appsettings.json` file.
+			options.SignInScheme = CookieAuthenticationDefaults.AuthenticationScheme;
+		});
+	```
+
+1. In your startup's `Configure` method before `UseMvc`:
 
     ```c#
-    app.UseCasAuthentication(new CasOptions
-    {
-        CasServerUrlBase = "https://your.cas.server.com/cas"
-    });
+    app.UseAuthentication();
     ```
+
+1. Create a login endpoint.  It doesn't have to automatically challenge but this example does:
+
+	```c#
+    [AllowAnonymous]
+    [Route("login")]
+    public async Task Login(string returnUrl)
+    {
+        var props = new AuthenticationProperties { RedirectUri = returnUrl };
+        await HttpContext.ChallengeAsync("CAS", props);
+    }
+	```
 
 ## CasOptions
 
 At a minmum, the `CasOptions` object needs to have the `CasServerUrlBase` property set to the URL to your CAS server.
 
-These options extend the [RemoteAuthenticationOptions](https://github.com/aspnet/Security/blob/master/src/Microsoft.AspNetCore.Authentication/RemoteAuthenticationOptions.cs) class.
+These options extend the [RemoteAuthenticationOptions](https://github.com/aspnet/Security/blob/rel/2.0.0/src/Microsoft.AspNetCore.Authentication/RemoteAuthenticationOptions.cs) class.
 
 **Properties**
 
-* `CasServerUrlBase` - The base url of the CAS server.  Required.
+| Property                  | Description                                                                                                                                                                                                                                                                                                                                                          | Default                                                                                                                                            |
+|---------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|
+| `CasServerUrlBase`        | The base url of the CAS server. Required.                                                                                                                                                                                                                                                                                                                            | `null`                                                                                                                                             |
+| `CasValidationUrl`        | Used in cases where ticket validation occurs on a separate server than user login.  Optional.                                                                                                                                                                                                                                                                        | `null`                                                                                                                                             |
+| `TicketValidator`         | Gets or sets the `ICasTicketValidator` used to validate tickets from CAS.                                                                                                                                                                                                                                                                                            | `Cas2TicketValidator`                                                                                                                              |
+| `StateDataFormat`         | Gets or sets the type used to secure data handled by the middleware.                                                                                                                                                                                                                                                                                                 | [`PropertiesDataFormat`](https://docs.microsoft.com/en-us/dotnet/api/microsoft.aspnetcore.authentication.propertiesdataformat?view=aspnetcore-2.0) |
+| `NameIdentifierAttribute` | If set, and using the CAS 2 payload, the ticket validator use the specified CAS attribute as the NameIdentifier claim, which is used to associate external logins.                                                                                                                                                                                                   | `null`                                                                                                                                             |
+| `Renew`                   | If this parameter is set, single sign-on will be bypassed. In this case, CAS will require the client to present credentials regardless of the existence of a single sign-on session with CAS.                                                                                                                                                                        | `false`                                                                                                                                            |
+| `Gateway`                 | If this parameter is set, CAS will not ask the client for credentials. If the client has a pre-existing single sign-on session with CAS, or if a single sign-on session can be established through non-interactive means (i.e. trust authentication), CAS MAY redirect the client to the URL specified by the `service` parameter, appending a valid service ticket. | `false`                                                                                                                                            |
+| `ServiceHost`             | Specify the domain name used in the `service` parameter.                                                                                                                                                                                                                                                                                                             | `null`                                                                                                                                             |
+| `ServiceForceHTTPS`       | Specify that exchanges with the CAS endpoint use `https`                                                                                                                                                                                                                                                                                                             | `false`                                                                                                                                            |
+| `EscapeServiceString`     | Escape the the service parameter string when sending requests to the CAS server. The default behavior to build the `service uri` is to escape, however, not all CAS server implementations will decode this value on receiving it.																													               | `true`                                                                                                                                             |
 
-* `TicketValidator` - Gets or sets the `ICasTicketValidator` used to validate tickets from CAS. Default: `Cas2TicketValidator`
+*See the [documentation for optional properties](https://apereo.github.io/cas/5.0.x/protocol/CAS-Protocol-V2-Specification.html#211-parameters) for more information if using `Renew` or `Gateway`.*
 
-* `Caption` - Get or sets the text that the user can display on a sign in user interface.  Default: "CAS".
-
-* `SignInAsAuthenticationType` - Gets or sets the name of another authentication middleware which will be responsible for actually issuing a user `ClaimsIdentity`.
-
-* `StateDataFormat` - Gets or sets the type used to secure data handled by the middleware.
-
-* `NameClaimType` - If set, and using the CAS 2 payload, the ticket validator will set the NameClaimType to the specified CAS attribute rather than using the default Name claim.
-
-* `NameIdentifierAttribute` - If set, and using the CAS 2 payload, the ticket validator use the specified CAS attribute as the NameIdentifier claim, which is used to associate external logins.
-
-**Inherited Properties**
-
-* `BackchannelTimeout` - Gets or sets timeout value in milliseconds for back channel communications with CAS.  Default: 60s
-
-* `HttpMessageHandler` - The HttpMessageHandler used to communicate with CAS.  
-
-* `CallbackPath` - The request path within the application's base path where the user-agent will be returned.  The middleware will process this request when it arrives.
-
-* `SignInScheme` - Gets or sets the authentication scheme corresponding to the middleware responsible of persisting user's identity after a successful authentication.  This value typically corresponds to a cookie middleware registered in the Startup class.  When omitted, `SharedAuthenticationOptions.SignInScheme` is used as a fallback value.
-
-## Other CAS Providers
+## Other .NET CAS Providers
 
 MVC 5: [Owin.Security.CAS](https://github.com/noelbundick/Owin.Security.CAS)
 
